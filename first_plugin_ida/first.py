@@ -2829,7 +2829,26 @@ class FIRST(object):
                     self._data = [d for d in self._data if not d.name.startswith('sub_')]
 
                 else:
-                    self._data = self.__original_data
+                    self._data += [d for d in self.__original_data if d.name.startswith('sub_')]
+
+                self.endResetModel()
+
+                self.select_all(False)
+
+            def filter_len_functions(self, flag):
+                '''Filters out or restores any len functions.
+
+                Args:
+                    flag (:obj:`bool`): Flag to filter out or restore len
+                        functions
+                '''
+                self.beginResetModel()
+
+                if flag:
+                    self._data = [d for d in self._data if len(d.name) <= 128 and len(d.prototype) <= 256]
+
+                else:
+                    self._data += [d for d in self.__original_data if len(d.name) > 128 or len(d.prototype) > 256]
 
                 self.endResetModel()
 
@@ -4180,7 +4199,9 @@ class FIRSTUI(object):
             vbox = QtWidgets.QVBoxLayout()
             self.select_all = QtWidgets.QCheckBox('Select All ')
             self.filter_sub_funcs = QtWidgets.QCheckBox('Filter Out "sub_" functions ')
+            self.filter_len_funcs = QtWidgets.QCheckBox('Filter Out len(Name)>128 or len(Prototype)>256 functions ')
             vbox.addWidget(self.filter_sub_funcs)
+            vbox.addWidget(self.filter_len_funcs)
             vbox.addWidget(self.select_all)
 
             format_str = '{} functions'.format(self.total_functions)
@@ -4198,6 +4219,7 @@ class FIRSTUI(object):
 
             self.select_all.stateChanged.connect(self.select_all_callback)
             self.filter_sub_funcs.stateChanged.connect(self.filter_sub_callback)
+            self.filter_len_funcs.stateChanged.connect(self.filter_len_callback)
 
             callback = lambda y, z: lambda x: self.table_clicked(x, y, z)
             for i in xrange(len(self.table_views)):
@@ -4213,6 +4235,20 @@ class FIRSTUI(object):
 
             format_str = '{} functions'
             if self.filter_sub_funcs.isChecked():
+                format_str = '{} filtered functions'
+            self.function_number.setText(format_str.format(self.total_functions))
+
+            if self.select_all.isChecked():
+                self.select_all.setChecked(False)
+
+        def filter_len_callback(self, value):
+            self.total_functions = 0
+            for data_model in self.data_models:
+                data_model.filter_len_functions(self.filter_len_funcs.isChecked())
+                self.total_functions += data_model.rowCount()
+
+            format_str = '{} functions'
+            if self.filter_len_funcs.isChecked():
                 format_str = '{} filtered functions'
             self.function_number.setText(format_str.format(self.total_functions))
 
