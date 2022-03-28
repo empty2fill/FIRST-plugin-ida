@@ -43,6 +43,13 @@ except ImportError:
     print 'FIRST requires Python module requests\n'
 
 try:
+    from concurrent.futures import as_completed
+    from requests_futures.sessions import FuturesSession
+except ImportError:
+    required_modules_loaded &= False
+    print 'FIRST requires Python module requests_futures'
+
+try:
     from requests_kerberos import HTTPKerberosAuth
 except ImportError:
     print '[1st] Kerberos support is not avaialble'
@@ -1966,6 +1973,7 @@ class FIRST(object):
 
         '''
         MAX_CHUNK = 20
+        MAX_WORKER = 8
         urn = '{0.protocol}://{0.server}:{0.port}/{1}'
         paths = {
                     #   Test Connection URL
@@ -2132,6 +2140,56 @@ class FIRST(object):
                 pprint(response)
 
             return response
+
+        def _sendf(self, session, action, params={}):
+            self.checkin(action)
+
+            if action not in self.paths:
+                return None
+
+            #   Ensure all None values are converted to empty strings
+            for key in params:
+                if params[key] is None:
+                    params[key] = ''
+
+            authentication = None
+            if self.auth:
+                if not HTTPKerberosAuth:
+                    idaapi.execute_ui_requests((FIRSTUI.Requests.Print('[1st] Kerberos module is not loaded\n'),))
+                    return
+
+                authentication = HTTPKerberosAuth()
+
+            url = self.urn.format(self, self.paths[action])
+            if FIRST.debug:
+                idaapi.execute_ui_requests(
+                    (FIRSTUI.Requests.Print(
+                        '[POST] {}\nSending: '.format(url.format(self._user()))),)
+                )
+                pprint(params)
+
+            try:
+                future = session.post(url.format(self._user()),
+                                            data=params,
+                                            verify=self.verify,
+                                            headers=g_network_headers,
+                                            auth=authentication)
+
+            except requests.exceptions.ConnectionError as e:
+                title = 'Cannot connect to FIRST'
+                msg = ('Unable to connect to FIRST server at {0}\n'
+                        'Retry operation').format(self.server)
+                idaapi.execute_ui_requests((FIRSTUI.Requests.MsgBox(title, msg),))
+                raise FIRST.Error('cannot connect')
+
+            except requests.exceptions.Timeout as e:
+                title = 'Cannot connect to FIRST'
+                msg = ( 'Unable to connect to FIRST server at {0}. '
+                        'Connection timed out.').format(self.server)
+                idaapi.execute_ui_requests((FIRSTUI.Requests.MsgBox(title, msg),))
+                return
+
+            return future
 
         def _sendg(self, action, params={}, raw=False):
             self.checkin(action)
@@ -2607,56 +2665,87 @@ class FIRST(object):
 
             subkeys = {'engines', 'matches'}
             architecture = FIRST.Info.get_architecture()
-            for i in xrange(0, len(metadata), self.MAX_CHUNK):
+            for i in xrange(0, len(metadata), self.MAX_CHUNK * self.MAX_WORKER):
                 if self.threads[thread]['stop']:
                     break
 
-                params = self._min_info()
-                data = {}
-                for m in metadata[i:i + self.MAX_CHUNK]:
-                    signature = m.signature
-                    if not signature:
+                session = FuturesSession(max_workers=8)
+                futures=[]
+                for w in range(self.MAX_WORKER):
+                    params = self._min_info()
+                    data = {}
+                    k = i + self.MAX_CHUNK * w
+                    for m in metadata[k:k + self.MAX_CHUNK]:
+                        signature = m.signature
+                        if not signature:
+                            continue
+
+                        data[m.address] = { 'opcodes' : b64encode(signature),
+                                            'apis' : m.apis,
+                                            'architecture' : architecture}
+                    if(len(data.keys())<=0):
                         continue
 
-                    data[m.address] = { 'opcodes' : b64encode(m.signature),
-                                        'apis' : m.apis,
-                                        'architecture' : architecture}
+                    params['functions'] = json.dumps(data)
 
-                params['functions'] = json.dumps(data)
+                    try:
+                        future = self._sendf(session, 'scan', params)
+                        futures.append(future)
+                    except FIRST.Error as e:
+                        self.threads[thread]['complete'] = True
+                        if complete_callback:
+                            complete_callback(thread, self.threads[thread])
+                        return
 
-                try:
-                    response = self._sendp('scan', params)
-                except FIRST.Error as e:
-                    self.threads[thread]['complete'] = True
-                    if complete_callback:
-                        complete_callback(thread, self.threads[thread])
-                    return
+                for future in as_completed(futures):
+                    response = future.result()
+                    if FIRST.debug:
+                        print response
+                        if 'content' in dir(response):
+                            print response.content
 
-                if (not response or ('results' not in response)
-                    or (dict != type(response['results']))
-                    or (not subkeys.issubset(response['results'].keys()))
-                    or (0 == len(response['results']['matches']))):
-                    continue
+                    if 'status_code' not in dir(response):
+                        continue
+                    elif 200 != response.status_code:
+                        continue
 
-                results = {}
-                engine_info = response['results']['engines']
-                matches = response['results']['matches']
-                for address_str in matches:
-                    functions = []
-                    address = int(address_str)
+                    #idaapi.execute_ui_requests((FIRSTUI.Requests.Print('Server Raw Response:'),
+                    #                    (FIRSTUI.Requests.Print(response)))
+                    #try:
+                    #    pprint(response.text)
+                    #except:
+                    #    pass
 
-                    for match in matches[address_str]:
-                        engines = {x : engine_info[x] for x in match['engines']}
-                        data = FIRST.MetadataServer(match, address, engines)
-                        functions.append(data)
+                    response = self.to_json(response)
+                    if FIRST.debug:
+                        idaapi.execute_ui_requests((FIRSTUI.Requests.Print('Server Response:'),))
+                        pprint(response)
 
-                    if len(functions) > 0:
-                        results[address] = functions
+                    if (not response or ('results' not in response)
+                        or (dict != type(response['results']))
+                        or (not subkeys.issubset(response['results'].keys()))
+                        or (0 == len(response['results']['matches']))):
+                        continue
 
-                if 0 < len(results):
-                    self.threads[thread]['results'].append(results)
-                    if data_callback:
-                        data_callback(thread, results)
+                    results = {}
+                    engine_info = response['results']['engines']
+                    matches = response['results']['matches']
+                    for address_str in matches:
+                        functions = []
+                        address = int(address_str)
+
+                        for match in matches[address_str]:
+                            engines = {x : engine_info[x] for x in match['engines']}
+                            data = FIRST.MetadataServer(match, address, engines)
+                            functions.append(data)
+
+                        if len(functions) > 0:
+                            results[address] = functions
+
+                    if 0 < len(results):
+                        self.threads[thread]['results'].append(results)
+                        if data_callback:
+                            data_callback(thread, results)
 
             self.threads[thread]['complete'] = True
             if complete_callback:
