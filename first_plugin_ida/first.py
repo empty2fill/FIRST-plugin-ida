@@ -647,6 +647,7 @@ class FIRST_FormClass(idaapi.PluginForm):
 
 class FIRST(object):
     debug = False
+    disable_apis = False
 
     #   About Information
     #------------------------
@@ -1093,6 +1094,9 @@ class FIRST(object):
                 list: Empty list or list of `MetadataShim` objects
             '''
             apis = []
+            if FIRST.disable_apis:
+                return apis
+
             #   populate iat
             if not FIRST.iat:
                 func = lambda ea, name, ord: FIRST.iat.append(name) == None
