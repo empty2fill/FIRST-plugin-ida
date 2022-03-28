@@ -3237,7 +3237,7 @@ class FIRST(object):
                 message (:obj:`str`): Format string for the wait box message.
             '''
             message = ('Uploading metadata for {0} function(s)\n'
-                       '          {1}% complete')
+                       '          {1} complete')
 
             def __init__(self, dialog):
                 data = []
@@ -3281,7 +3281,7 @@ class FIRST(object):
                     #   Update Wait Box
                     self.uploaded += 1
                     percentage = int((self.uploaded / self.total) * 100)
-                    msg = self.message.format(self.total, percentage)
+                    msg = self.message.format(self.total, self.uploaded)
                     idaapi.replace_wait_box(msg)
 
                     if idaapi.wasBreak():
